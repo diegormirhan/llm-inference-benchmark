@@ -1,0 +1,22 @@
+# Servidor de API e Runtime
+lifestar
+granian
+pydantic-settings
+
+# Modelos de Inferência
+torch
+transformers
+vllm --extra-index-url https://wheels.vllm.ai/rocm/0.25.1/rocm723
+autoawq
+
+# Testes de Carga
+httpx
+asyncio
+
+# Telemetria de GPU (Específico para AMD)
+amdsmi
+
+# Dashboard e Dados
+streamlit
+pandas
+matplotlib
