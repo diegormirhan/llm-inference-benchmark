@@ -35,11 +35,26 @@ class GPUMonitor:
                     gpu_activity = amdsmi.amdsmi_get_gpu_activity(gpu) # lê atividade da GPU
                     gpu_percent = gpu_activity["gfx_activity"] # % de uso
 
+                    # Métricas extras: falha isolada não derruba a amostra inteira
+                    power_w = gfx_clock_mhz = mem_clock_mhz = None
+                    try:
+                        power_w = amdsmi.amdsmi_get_power_info(gpu)["socket_power"]
+                    except Exception:
+                        pass
+                    try:
+                        gfx_clock_mhz = amdsmi.amdsmi_get_clock_info(gpu, amdsmi.AmdSmiClkType.GFX)["clk"]
+                        mem_clock_mhz = amdsmi.amdsmi_get_clock_info(gpu, amdsmi.AmdSmiClkType.MEM)["clk"]
+                    except Exception:
+                        pass
+
                     self._data.append({
                         "timestamp": timestamp,
                         "vram_used_mb": vram_used_mb,
                         "vram_total_mb": vram_total_mb,
-                        "gpu_percent": gpu_percent
+                        "gpu_percent": gpu_percent,
+                        "power_w": power_w,
+                        "gfx_clock_mhz": gfx_clock_mhz,
+                        "mem_clock_mhz": mem_clock_mhz
                     }) # salva a amostra
                 except Exception as e:
                     print(f"Erro ao coletar métricas: {e}")
@@ -66,14 +81,15 @@ class GPUMonitor:
         data_dir = Path("data")
         data_dir.mkdir(exist_ok=True)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
         filename = data_dir / f"telemetry_{engine_type}_{timestamp}.csv"
 
         if not self._data:
             print("Sem dados de telemetria para salvar")
             return ""
 
-        fieldnames = ["timestamp", "vram_used_mb", "vram_total_mb", "gpu_percent"]
+        fieldnames = ["timestamp", "vram_used_mb", "vram_total_mb", "gpu_percent",
+                      "power_w", "gfx_clock_mhz", "mem_clock_mhz"]
         with open(filename, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()

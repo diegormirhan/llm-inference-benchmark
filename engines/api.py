@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="tvm_ffi")
+
 import logging, uvicorn
 from typing import Dict
 
@@ -15,7 +18,7 @@ from engines.speculative_engine import SpeculativeEngine
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%d/%m/%Y %H:%M:%S"
 )
 logger = logging.getLogger("LitestarServer")
 
@@ -82,7 +85,7 @@ async def health_check() -> Dict[str, str]:
         "model": settings.model_id
     }
 
-@post("/generate")
+@post("/generate", status_code=200)
 async def generate_text(data: GenerationRequest, state: State) -> GenerationResponse:
     # Endpoint para geração de texto utilizando o motor ativo
     engine = state.active_engine
@@ -111,7 +114,8 @@ async def on_startup(app: Litestar) -> None:
         app.state.active_engine = SpeculativeEngine(target_model=settings.target_model, draft_model=settings.draft_model)
     else:
         raise ValueError(f"Motor '{engine_type}' não suportado. Escolha 'hf', 'vllm', 'awq', 'speculative'.")
-        
+    
+    await app.state.active_engine.warmup()
     logger.info(f"Motor '{engine_type}' inicializado e pronto na GPU!")
 
 app = Litestar(

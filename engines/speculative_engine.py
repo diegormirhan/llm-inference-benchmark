@@ -33,16 +33,28 @@ class SpeculativeEngine(BaseEngine):
             f"vLLM Speculative Engine carregado: target={self.target_model}, draft={self.draft_model}"
         )
 
+    async def warmup(self) -> None:
+        self.logger.info("Executando warmup para pré-compilar kernels...")
+        from vllm.inputs import TextPrompt
+        warmup_params = SamplingParams(max_tokens=10, temperature=0.7)
+        warmup_prompt = TextPrompt(prompt="Warmup")
+        generator = self.engine.generate(warmup_prompt, warmup_params, "warmup")
+        async for _ in generator:
+            pass
+        self.logger.info("Warmup concluído")
+
     async def generate(self, prompt: str, max_tokens: int = 100) -> dict:
+        from vllm.inputs import TextPrompt
         start = time.time()
         sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.7)
         messages = [{"role": "user", "content": prompt}]
         formatted_prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        inputs = TextPrompt(prompt=formatted_prompt)
 
         request_id = str(uuid.uuid4())
-        generator = self.engine.generate(formatted_prompt, sampling_params, request_id)
+        generator = self.engine.generate(inputs, sampling_params, request_id)
 
         final_output = None
         async for request_output in generator:

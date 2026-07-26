@@ -3,6 +3,15 @@ from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, asdict
 from typing import List
+from telemetry.monitor import GPUMonitor
+
+SHORT_PROMPT = "Explique Machine Learning em uma frase."
+LONG_PROMPT = """Explique detalhadamente o conceito de Machine Learning, cobrindo os seguintes tópicos: 
+definição e fundamentos teóricos, os 3 principais tipos de aprendizado (supervisionado, não supervisionado
+e por reforço), exemplos práticos de aplicações em diferentes setores da indústria, os principais desafios
+e limitações atuais da área e como você vẽ o futuro do Machine Learning nos próximos 10 anos. seja o mais
+detalhado possível em cada tópicos"""
+
 
 @dataclass
 class RequestResult:
@@ -12,6 +21,9 @@ class RequestResult:
     completion_tokens: int
     success: bool
     error: str = ""
+    generated_text: str = ""
+    engine_used: str = ""
+    elapsed_seconds: float = 0.0
 
 async def single_request(
         client: httpx.AsyncClient,
@@ -38,26 +50,36 @@ async def single_request(
                     latency = latency,
                     prompt_tokens = data["prompt_tokens"],
                     completion_tokens = data["completion_tokens"],
+                    generated_text = data["generated_text"],
+                    engine_used = data["engine_used"],
+                    elapsed_seconds = data["elapsed_seconds"],
                     success = True
                 )
             else:
+                try:
+                    error_body = response.json()
+                    error_msg = error_body.get("detail", error_body.get("message", str(error_body)))
+                except:
+                    error_msg = response.text or f"HTTP {response.status_code}"
+
                 return RequestResult(
                     request_id = request_id,
                     latency = latency,
                     prompt_tokens = 0,
                     completion_tokens = 0,
                     success = False,
-                    error = f"HTTP {response.status_code}"
+                    error = f"HTTP {response.status_code}: {error_msg}"
                 )
         except Exception as e:
             latency = time.time() - start
+            error_msg = str(e) or repr(e) or type(e).__name__
             return RequestResult(
                 request_id = request_id,
                 latency = latency,
                 prompt_tokens = 0,
                 completion_tokens = 0,
                 success = False,
-                error = str(e)
+                error = f"{type(e).__name__}: {error_msg}"
             )
 
 def calculate_percentile(values: List[float], percentile: float) -> float:
@@ -72,9 +94,12 @@ async def run_benchmark(
         num_users: int,
         num_requests: int,
         prompt: str,
-        max_tokens: int
+        max_tokens: int,
+        engine_type: str = "hf"
 ) -> dict:
     semaphore = asyncio.Semaphore(num_users)
+    monitor = GPUMonitor()
+    monitor.start()
 
     async with httpx.AsyncClient() as client:
         tasks = [
@@ -82,6 +107,9 @@ async def run_benchmark(
             for i in range(num_requests)
         ]
         results: List[RequestResult] = await asyncio.gather(*tasks)
+
+    monitor.stop()
+    telemetry_file = monitor.save(engine_type)
 
     successful = [r for r in results if r.success]
     failed = [r for r in results if not r.success]
@@ -93,7 +121,7 @@ async def run_benchmark(
     tokens_per_second = total_tokens / total_time if total_time > 0 else 0
 
     summary = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         "num_users": num_users,
         "num_requests": num_requests,
         "max_tokens": max_tokens,
@@ -104,6 +132,7 @@ async def run_benchmark(
         "latency_p95": calculate_percentile(latencies, 95),
         "latency_avg": sum(latencies) / len(latencies) if latencies else 0,
         "tokens_per_second": tokens_per_second,
+        "telemetry_file": telemetry_file,
         "requests": [asdict(r) for r in results]
     }
 
@@ -113,7 +142,7 @@ def save_results(results: dict, engine_type: str) -> str:
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
     filename = data_dir / f"results_{engine_type}_{timestamp}.json"
 
     with open(filename, "w") as f:
@@ -130,16 +159,19 @@ if __name__ == "__main__":
     parser.add_argument("--users", type=int, default = 5)
     parser.add_argument("--requests", type=int, default = 10)
     parser.add_argument("--max-tokens", type=int, default=100)
-    parser.add_argument("--prompt", default="Explique machine learning em uma frase.")
+    parser.add_argument("--prompt-size", choices=["short", "long"], default="short")
 
     args = parser.parse_args()
+
+    prompt = LONG_PROMPT if args.prompt_size == "long" else SHORT_PROMPT
 
     results = asyncio.run(run_benchmark(
         api_url = args.api_url,
         num_users = args.users,
         num_requests = args.requests,
-        prompt = args.prompt,
-        max_tokens = args.max_tokens
+        prompt = prompt,
+        max_tokens = args.max_tokens,
+        engine_type = args.engine
     ))
 
     filename = save_results(results, args.engine)

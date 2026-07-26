@@ -19,7 +19,7 @@ class AWQEngine(BaseEngine):
         engine_args = AsyncEngineArgs(
             model = self.awq_model,
             trust_remote_code = True,
-            quantization = "awq", # ativa o suporte AWQ do vLLM (4-bit quantization)
+            quantization = "awq_marlin", # ativa o suporte AWQ do vLLM (4-bit quantization)
             enable_prefix_caching = True, # cacheia o prefixo comum entre requisições. se vários usuários enviam prompts similares, o vllm reutiliza a computação de prefixo
             enable_chunked_prefill= True, # divide prompts longos em chunks para nao travar a geração.
             enforce_eager= False, # permite uso do cuda graphs
@@ -29,18 +29,30 @@ class AWQEngine(BaseEngine):
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         self.logger.info(f"vLLM AWQ Engine carregado para {self.awq_model}")
 
+    async def warmup(self) -> None:
+        self.logger.info("Executando warmup para pré-compilar kernels...")
+        from vllm.inputs import TextPrompt
+        warmup_params = SamplingParams(max_tokens=10, temperature=0.7)
+        warmup_prompt = TextPrompt(prompt="Warmup")
+        generator = self.engine.generate(warmup_prompt, warmup_params, "warmup")
+        async for _ in generator:
+            pass
+        self.logger.info("Warmup concluído")
+
     # cria o motor assíncrono com as configurações acima
     async def generate(self, prompt: str, max_tokens: int = 100) -> dict:
+        from vllm.inputs import TextPrompt
         start = time.time()
         sampling_params = SamplingParams(max_tokens = max_tokens, temperature=0.7)
         messages = [{"role": "user", "content": prompt}]
         formatted_prompt  = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        inputs = TextPrompt(prompt=formatted_prompt)
 
         # aplica o chat template do Qwen
         request_id = str(uuid.uuid4())
-        generator = self.engine.generate(formatted_prompt, sampling_params, request_id)
+        generator = self.engine.generate(inputs, sampling_params, request_id)
 
         # gera um ID único para a requisição e inicia a geração assíncrona
         final_output = None

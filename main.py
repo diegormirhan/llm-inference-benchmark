@@ -3,7 +3,7 @@ import argparse, os, sys, time, subprocess, urllib.request, logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%d/%m/%Y %H:%M:%S"
 )
 logger = logging.getLogger("Orchestrator")
 
@@ -31,11 +31,20 @@ def main():
         choices=["hf", "vllm", "awq", "speculative"],
         help="Motor de inferência a ser testado ('hf', 'vllm', 'awq', 'speculative')"
     )
+    parser.add_argument(
+        "--engine-only",
+        action="store_true",
+        help="Sobe apenas a API, sem abrir o Streamlit (usado quando o dashboard gerencia o processo)"
+    )
     args = parser.parse_args()
 
     # Define a variável de ambiente para a API saber qual engine carregar
     env = os.environ.copy()
     env["ENGINE_TYPE"] = args.engine
+
+    venv_path = sys.prefix
+    env["PYTHONPATH"] = f"{venv_path}/lib/python3.14/site-packages/_rocm_sdk_core/share/amd_smi"
+    env["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "TRUE"
 
     python_executable = sys.executable
 
@@ -48,8 +57,12 @@ def main():
     streamlit_process = None
 
     try:
+        if args.engine_only:
+            # Modo dashboard: Streamlit é o processo pai, main.py só mantém a API da engine viva
+            logger.info("Modo --engine-only: API rodando. Aguardando encerramento externo...")
+            api_process.wait()
         # Aguarda a API estar online
-        if wait_for_api("http://localhost:8000"):
+        elif wait_for_api("http://localhost:8000"):
             logger.info("Iniciando Dashboard do Streamlit...")
             streamlit_process = subprocess.Popen(
                 [python_executable, "-m", "streamlit", "run", "dashboard/app.py"]

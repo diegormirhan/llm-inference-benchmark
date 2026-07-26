@@ -28,3 +28,7 @@ class BaseEngine(ABC):
     async def generate(self, prompt: str, max_tokens: int = 100) -> dict:
         # Abstract method to perform inference. Returns the generated text.
         pass
+
+    async def warmup(self) -> None:
+        # Optional warmup method. Override in subclasses if needed.
+        pass

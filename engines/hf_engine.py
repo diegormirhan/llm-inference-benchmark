@@ -35,7 +35,7 @@ class HuggingFaceEngine(BaseEngine):
 
         # Tokenização (preparando o texto para a mtemática da GPU)
         inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.device)
-        prompt_tokens = inputs.inputs_ids.shape[-1]
+        prompt_tokens = inputs.input_ids.shape[-1]
 
         # Geração de texto
         with torch.no_grad():
