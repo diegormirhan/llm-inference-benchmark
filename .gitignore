@@ -6,3 +6,5 @@ __pycache__/
 .vscode/
 data/
 implementation_plan.md
+.opencode
+summary.md
