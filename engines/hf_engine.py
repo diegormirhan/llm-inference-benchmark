@@ -1,4 +1,4 @@
-import torch, time
+import torch, time, gc
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from engines.base_engine import BaseEngine
 
@@ -61,3 +61,14 @@ class HuggingFaceEngine(BaseEngine):
             "completion_tokens": completion_tokens,
             "elapsed_seconds": elapsed
         }
+
+    def shutdown(self) -> None:
+        self.logger.info("Desligando HF engine e liberando VRAM...")
+        self.model = None
+        self.tokenizer = None
+        gc.collect()
+        try:
+            torch.cuda.empty_cache()
+        except Exception as exc:
+            self.logger.warning(f"empty_cache falhou (ignorado): {exc}")
+        self.logger.info("VRAM liberada")

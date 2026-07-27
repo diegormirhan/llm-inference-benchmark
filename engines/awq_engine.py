@@ -1,4 +1,5 @@
-import uuid, time
+import uuid, time, gc
+import torch
 from transformers import AutoTokenizer
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from engines.base_engine import BaseEngine
@@ -72,4 +73,15 @@ class AWQEngine(BaseEngine):
             "completion_tokens": completion_tokens,
             "elapsed_seconds": elapsed
         }
+
+    def shutdown(self) -> None:
+        self.logger.info("Desligando vLLM AWQ engine e liberando VRAM...")
+        self.engine = None
+        self.tokenizer = None
+        gc.collect()
+        try:
+            torch.cuda.empty_cache()
+        except Exception as exc:
+            self.logger.warning(f"empty_cache falhou (ignorado): {exc}")
+        self.logger.info("VRAM liberada")
 

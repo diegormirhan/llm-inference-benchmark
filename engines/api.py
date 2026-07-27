@@ -1,7 +1,11 @@
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="tvm_ffi")
 
-import logging, uvicorn
+import atexit
+import logging
+import os
+import signal
+import uvicorn
 from typing import Dict
 
 from litestar import Litestar, post, get
@@ -103,7 +107,7 @@ async def generate_text(data: GenerationRequest, state: State) -> GenerationResp
 async def on_startup(app: Litestar) -> None:
     engine_type = settings.engine_type.lower()
     logger.info(f"Inicializando APENAS o motor '{engine_type}' com o modelo: {settings.model_id}...")
-    
+
     if engine_type == "hf":
         app.state.active_engine = HuggingFaceEngine(model_id=settings.model_id)
     elif engine_type == "vllm":
@@ -114,9 +118,30 @@ async def on_startup(app: Litestar) -> None:
         app.state.active_engine = SpeculativeEngine(target_model=settings.target_model, draft_model=settings.draft_model)
     else:
         raise ValueError(f"Motor '{engine_type}' não suportado. Escolha 'hf', 'vllm', 'awq', 'speculative'.")
-    
+
     await app.state.active_engine.warmup()
     logger.info(f"Motor '{engine_type}' inicializado e pronto na GPU!")
+
+    def _release() -> None:
+        eng = getattr(app.state, "active_engine", None)
+        if eng is None:
+            return
+        try:
+            eng.shutdown()
+        except Exception as exc:
+            logger.error(f"Falha no shutdown do engine: {exc}")
+        app.state.active_engine = None
+
+    def _signal_handler(signum: int, _frame) -> None:
+        logger.info(f"Sinal {signum} recebido, liberando engine antes de sair...")
+        _release()
+        # os._exit evita que o uvicorn execute um shutdown redundante
+        # (que poderia disparar _release novamente via atexit).
+        os._exit(0)
+
+    atexit.register(_release)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
 
 app = Litestar(
     route_handlers=[health_check, generate_text],
@@ -124,4 +149,7 @@ app = Litestar(
 )
 
 if __name__ == "__main__":
-    uvicorn.run("engines.api:app", host="0.0.0.0", port=8000, reload=False)
+    # access_log=False: skips the per-request uvicorn access line.
+    # /health is polled every 2s by the dashboard and would flood the log;
+    # /generate already emits its own logger.info at the app level.
+    uvicorn.run("engines.api:app", host="0.0.0.0", port=8000, reload=False, access_log=False)

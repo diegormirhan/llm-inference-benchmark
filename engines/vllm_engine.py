@@ -1,4 +1,5 @@
-import uuid, time
+import uuid, time, gc
+import torch
 from transformers import AutoTokenizer
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from engines.base_engine import BaseEngine
@@ -76,3 +77,16 @@ class VLLMEngine(BaseEngine):
             "completion_tokens": completion_tokens,
             "elapsed_seconds": elapsed
         }
+
+    def shutdown(self) -> None:
+        # Dropa a referência do AsyncLLMEngine (libera KV cache + PagedAttention),
+        # força GC e devolve a memória cacheada ao ROCm/HIP allocator.
+        self.logger.info("Desligando vLLM engine e liberando VRAM...")
+        self.engine = None
+        self.tokenizer = None
+        gc.collect()
+        try:
+            torch.cuda.empty_cache()
+        except Exception as exc:
+            self.logger.warning(f"empty_cache falhou (ignorado): {exc}")
+        self.logger.info("VRAM liberada")

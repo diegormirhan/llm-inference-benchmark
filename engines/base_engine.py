@@ -32,3 +32,9 @@ class BaseEngine(ABC):
     async def warmup(self) -> None:
         # Optional warmup method. Override in subclasses if needed.
         pass
+
+    def shutdown(self) -> None:
+        # Libera recursos de GPU. Default no-op; engines com modelos
+        # em VRAM devem sobrescrever para dropar referências e chamar
+        # torch.cuda.empty_cache().
+        pass

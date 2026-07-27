@@ -1,4 +1,4 @@
-import argparse, os, sys, time, subprocess, urllib.request, logging
+import argparse, os, signal, sys, time, subprocess, urllib.request, logging
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +56,30 @@ def main():
     )
     streamlit_process = None
 
+    # Handler de SIGTERM: cobre o caso `kill <main.py_pid>` (ou killpg vindo
+    # do dashboard) e garante que engines.api também seja encerrado,
+    # evitando que vire processo órfão segurando :8000 e a VRAM.
+    # Timeouts curtos porque engine.shutdown() do vLLM pode levar 10s+;
+    # o fallback é SIGKILL e o OS reclaims a VRAM.
+    def _on_sigterm(_signum, _frame):
+        logger.info("SIGTERM recebido, encerrando processos filhos...")
+        if api_process.poll() is None:
+            try:
+                api_process.send_signal(signal.SIGTERM)
+                api_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                api_process.kill()
+                try:
+                    api_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+        if streamlit_process is not None and streamlit_process.poll() is None:
+            streamlit_process.terminate()
+            streamlit_process.wait()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     try:
         if args.engine_only:
             # Modo dashboard: Streamlit é o processo pai, main.py só mantém a API da engine viva
@@ -73,8 +97,17 @@ def main():
     except KeyboardInterrupt:
         logger.info("\nEncerrando API e Streamlit...")
     finally:
-        api_process.terminate()
-        api_process.wait()
+        if api_process.poll() is None:
+            try:
+                api_process.send_signal(signal.SIGTERM)
+                api_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                logger.warning("API não respondeu ao SIGTERM em 2s, enviando SIGKILL")
+                api_process.kill()
+                try:
+                    api_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
         if streamlit_process is not None:
             streamlit_process.terminate()
             streamlit_process.wait()
