@@ -1,4 +1,4 @@
-# LLM Inference Benchmark: AMD RX 9060XT (16GB) with ROCm
+# LLM Inference Benchmark: AMD GPU with ROCm
 
 Comparative benchmark of four LLM inference engines on consumer AMD hardware. The goal is to measure throughput, latency, and VRAM behavior under concurrent load, with live telemetry from the GPU.
 
@@ -6,10 +6,10 @@ This project is built specifically for Linux systems running AMD GPUs via ROCm. 
 
 ## Hardware Requirements
 
-- **GPU**: AMD Radeon RX 9060XT (16GB VRAM)
+- **GPU**: AMD GPU with at least 8GB VRAM
 - **OS**: Linux (tested on native installation, not WSL)
 - **Driver**: ROCm 6.x with `amdsmi` available
-- **RAM**: 32GB+ recommended (for model loading and KV cache)
+- **RAM**: 24GB+ recommended (for model loading and KV cache)
 
 ## Models
 
@@ -52,24 +52,201 @@ All GPU memory is owned by the API process. The dashboard and tester run on CPU 
 
 ## Project Structure
 
+### Directory Tree
+
 ```
 llm-inference-benchmark/
-├── main.py                   # Orchestrator: starts API, optionally Streamlit
-├── engines/
-│   ├── base_engine.py        # Abstract base class
-│   ├── hf_engine.py          # Motor 1: HuggingFace transformers
-│   ├── vllm_engine.py        # Motor 2: vLLM with PagedAttention
-│   ├── awq_engine.py         # Motor 3: vLLM + AWQ 4-bit quantization
-│   ├── speculative_engine.py # Motor 4: vLLM + speculative decoding
-│   └── api.py                # Litestar API with graceful shutdown
-├── load_tester/
-│   └── tester.py             # Concurrent load testing via httpx + asyncio
-├── telemetry/
-│   └── monitor.py            # GPU metrics via amdsmi (VRAM, power, clocks)
-├── dashboard/
-│   └── app.py                # Streamlit UI with live consoles and charts
-└── data/                     # Results (JSON) and telemetry (CSV) per run
+├── main.py                          # Entry point: orchestrates API and dashboard processes
+├── requirements.txt                 # Python dependencies (litestar, vllm, streamlit, amdsmi)
+├── .env                             # Environment variables (HF_TOKEN, ENGINE_TYPE, etc.)
+├── .gitignore                       # Git ignore rules
+│
+├── engines/                         # Inference engine implementations
+│   ├── __init__.py
+│   ├── config.py                    # Pydantic settings (model IDs, engine type, env vars)
+│   ├── base_engine.py               # Abstract base class with load_model(), generate(), shutdown()
+│   ├── hf_engine.py                 # HuggingFace transformers (baseline, no optimizations)
+│   ├── vllm_engine.py               # vLLM with PagedAttention + prefix caching + chunked prefill
+│   ├── awq_engine.py                # vLLM + AWQ 4-bit quantization (pre-quantized model)
+│   ├── speculative_engine.py        # vLLM + speculative decoding (target 3B + draft 0.5B)
+│   └── api.py                       # Litestar API server with graceful shutdown handlers
+│
+├── load_tester/                     # Concurrent load testing
+│   ├── __init__.py
+│   └── tester.py                    # httpx + asyncio: simulates N concurrent users
+│
+├── telemetry/                       # GPU monitoring
+│   ├── __init__.py
+│   └── monitor.py                   # amdsmi integration: VRAM, GPU%, power, clocks (500ms interval)
+│
+├── dashboard/                       # Streamlit web interface
+│   ├── __init__.py
+│   └── app.py                       # Parent process manager, live consoles, results visualization
+│
+└── data/                            # Runtime outputs (gitignored)
+    ├── results_<engine>_<timestamp>.json    # Benchmark metrics (throughput, latency, error rate)
+    ├── telemetry_<engine>_<timestamp>.csv   # GPU telemetry time series
+    └── logs/
+        ├── api.log                  # API server output (tailable in dashboard)
+        └── tester.log               # Load tester output (tailable in dashboard)
 ```
+
+### Component Responsibilities
+
+**main.py** — Orchestrator
+- Parses CLI arguments (`--engine`, `--api-only`)
+- Starts the Litestar API as a subprocess with ROCm environment variables
+- Optionally starts Streamlit dashboard (unless `--api-only` is set)
+- Handles SIGTERM/SIGINT to gracefully terminate child processes
+- Sets `PYTHONPATH` and `FLASH_ATTENTION_TRITON_AMD_ENABLE` for ROCm compatibility
+
+**engines/config.py** — Configuration
+- Loads settings from `.env` using `pydantic-settings`
+- Defines model IDs (base, AWQ, target, draft)
+- Validates engine type (`hf`, `vllm`, `awq`, `speculative`)
+- Centralizes all configuration to avoid scattered `os.getenv()` calls
+
+**engines/base_engine.py** — Abstract Interface
+- Defines the contract all engines must implement:
+  - `load_model()`: loads model weights into VRAM
+  - `generate(prompt, max_tokens)`: performs inference, returns metrics
+  - `warmup()`: optional pre-compilation of Triton kernels
+  - `shutdown()`: releases VRAM (drops references, `gc.collect()`, `torch.cuda.empty_cache()`)
+- All engines inherit from this base class
+
+**engines/hf_engine.py** — HuggingFace Baseline
+- Uses `transformers.AutoModelForCausalLM` with `torch.float16`
+- No optimizations (baseline for comparison)
+- Degrades under concurrency (no PagedAttention)
+- Hits OOM errors with high concurrent load
+
+**engines/vllm_engine.py** — vLLM Optimized
+- Uses `vllm.AsyncLLMEngine` with:
+  - `enable_prefix_caching=True`: reuses KV cache for common prompt prefixes
+  - `enable_chunked_prefill=True`: splits long prompts to avoid blocking
+  - `gpu_memory_utilization=0.85`: reserves 85% of VRAM for KV cache
+- Maintains stable latency under high concurrency
+- Spawns worker subprocesses for distributed execution
+
+**engines/awq_engine.py** — AWQ Quantized
+- Same vLLM engine but with `quantization="awq_marlin"`
+- Loads pre-quantized 4-bit model from HuggingFace Hub
+- Uses ~70% less VRAM than fp16 baseline
+- ~24% slower due to dequantization overhead
+
+**engines/speculative_engine.py** — Speculative Decoding
+- Uses vLLM's `speculative_config` with:
+  - Target model: `Qwen/Qwen2.5-3B-Instruct` (3B parameters)
+  - Draft model: `Qwen/Qwen2.5-0.5B-Instruct` (0.5B parameters)
+  - `num_speculative_tokens=5`: draft proposes 5 tokens, target verifies in parallel
+- Effective when draft predictions are frequently correct
+- Total VRAM: ~7.7GB (target + draft + KV cache)
+
+**engines/api.py** — Litestar API Server
+- Exposes `POST /generate` and `GET /health` endpoints
+- Loads one engine at startup based on `ENGINE_TYPE` env var
+- Calls `engine.warmup()` before accepting requests
+- Implements graceful shutdown:
+  - Signal handlers (SIGTERM, SIGINT) call `engine.shutdown()`
+  - `atexit` hook ensures cleanup on normal exit
+  - `os._exit(0)` bypasses uvicorn's redundant shutdown
+
+**load_tester/tester.py** — Concurrent Load Generator
+- Simulates N concurrent users via `httpx.AsyncClient` + `asyncio.gather`
+- Sends POST requests to `/generate` endpoint
+- Measures per-request latency (client-side)
+- Collects metrics:
+  - Throughput (tokens/second)
+  - Latency percentiles (P50, P95, average)
+  - Error rate (failed requests / total)
+- Starts/stops `GPUMonitor` automatically during the test
+- Saves results to `data/results_<engine>_<timestamp>.json`
+
+**telemetry/monitor.py** — GPU Telemetry Collector
+- Uses `amdsmi` to sample GPU metrics every 500ms
+- Collects:
+  - `vram_used_mb`: VRAM usage in megabytes
+  - `gpu_percent`: GPU utilization percentage
+  - `power_w`: socket power draw in watts
+  - `gfx_clock_mhz`: graphics core clock speed
+  - `mem_clock_mhz`: memory clock speed
+- Runs in a background thread during load tests
+- Saves time series to `data/telemetry_<engine>_<timestamp>.csv`
+- Handles metric collection failures gracefully (logs warning, continues)
+
+**dashboard/app.py** — Streamlit Web Interface
+- Acts as the parent process (manages API and tester subprocesses)
+- Sidebar controls:
+  - Engine selection (dropdown)
+  - Start/Stop API buttons
+  - Benchmark parameters (users, requests, max_tokens, prompt_size)
+- Main area with two tabs:
+  - **Consoles**: live tail of `api.log` and `tester.log` with auto-scroll
+  - **Results**: aggregated metrics and charts from `data/` directory
+- Health monitoring: polls `/health` endpoint every 2s to detect API status
+- Process management:
+  - Starts API with `start_new_session=True` (isolated process group)
+  - Sends SIGTERM to entire group on stop (kills API + vLLM workers)
+  - Falls back to SIGKILL after timeout
+- Results visualization:
+  - KPI cards (tokens/second, P95 latency per engine)
+  - Bar charts (throughput comparison, latency comparison)
+  - Time series (VRAM, GPU%, power, clock speeds)
+  - Run history table (all benchmark runs in `data/`)
+
+### Data Flow
+
+```
+User → Streamlit Dashboard (:8501)
+         ↓ (HTTP)
+         ↓ "Start API"
+         ↓
+         ├─→ main.py --engine vllm --api-only
+         │     ↓
+         │     └─→ engines.api (Litestar :8000)
+         │           ↓
+         │           └─→ VLLMEngine.load_model() → GPU VRAM
+         │
+         ↓ (HTTP)
+         ↓ "Run Benchmark"
+         ↓
+         └─→ load_tester.tester (subprocess)
+               ↓
+               ├─→ telemetry.monitor.start() → data/telemetry_*.csv
+               │
+               ├─→ httpx.AsyncClient × N users
+               │     ↓ (HTTP POST /generate)
+               │     ↓
+               │     └─→ engines.api → VLLMEngine.generate() → GPU
+               │
+               └─→ Save metrics → data/results_*.json
+```
+
+### Environment Variables
+
+Defined in `.env` (loaded by `engines/config.py`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HF_TOKEN` | (required) | HuggingFace API token for model downloads |
+| `MODEL_ID` | `Qwen/Qwen2.5-3B-Instruct` | Base model for HF and vLLM engines |
+| `AWQ_MODEL` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | Pre-quantized AWQ model |
+| `TARGET_MODEL` | `Qwen/Qwen2.5-3B-Instruct` | Target model for speculative decoding |
+| `DRAFT_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct` | Draft model for speculative decoding |
+| `ENGINE_TYPE` | `hf` | Active engine: `hf`, `vllm`, `awq`, or `speculative` |
+| `MAX_CONCURRENT_REQUESTS` | `100` | Max concurrent requests per API instance |
+
+### Key Design Decisions
+
+1. **Single engine per process**: The API loads one engine at a time. Switching engines requires restarting the API. This avoids VRAM contention and simplifies resource management.
+
+2. **Dashboard as parent process**: Streamlit owns the subprocess lifecycle. This allows clean shutdown (SIGTERM to process group) and prevents orphaned GPU processes.
+
+3. **No streaming or TTFT**: This version measures end-to-end latency only. Streaming and time-to-first-token are not implemented (future work).
+
+4. **ROCm-specific optimizations**: The project uses ROCm-native PyTorch and vLLM builds. CUDA graphs and Flash Attention are enabled where supported.
+
+5. **Graceful shutdown**: All engines implement `shutdown()` to release VRAM explicitly. Signal handlers ensure cleanup even on abrupt termination.
 
 ## How to Run
 
@@ -78,20 +255,40 @@ llm-inference-benchmark/
 Install dependencies with ROCm support:
 
 ```bash
-# Install PyTorch with ROCm
-pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
+# Install AMD drivers
+sudo amdgpu-install
 
-# Install vLLM with ROCm
-pip install vllm
+# Clone the repository
+git clone https://github.com/diegormirhan/llm-inference-benchmark.git
+cd llm-inference-benchmark
+
+# Set up your Python virtual environment.
+python3.14 -m venv .venv
+source .venv/bin/activate
+
+# Follow AMD guide to install Rocm according to your system requirements
+https://rocm.docs.amd.com/en/latest/install/rocm.html
+
+# Follow AMD guide to install Pytorch and Vllm packages according to your system requirements
+https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/inference/vllm.html
 
 # Other dependencies
 pip install -r requirements.txt
 ```
 
-Set your HuggingFace token if using gated models:
+Create your .env file and set the tokens:
 
 ```bash
-export HF_TOKEN=your_token_here
+HF_TOKEN=your-hf-token
+
+MODEL_ID=Qwen/Qwen2.5-3B-Instruct
+AWQ_MODEL = Qwen/Qwen2.5-3B-Instruct-AWQ
+TARGET_MODEL = Qwen/Qwen2.5-3B-Instruct
+DRAFT_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+
+ENGINE_TYPE=hf
+
+MAX_CONCURRENT_REQUESTS=100
 ```
 
 ### Dashboard Mode (Recommended)
@@ -175,16 +372,6 @@ Time-series charts show how each engine uses GPU resources during the benchmark.
 - **HuggingFace baseline** degrades rapidly with concurrent requests and hits OOM errors.
 - **Speculative decoding** shows speedup when the draft model's predictions are frequently accepted by the target.
 - **Warmup** is critical: the first request after startup is slow due to Triton kernel compilation. Subsequent requests are fast.
-
-## Graceful Shutdown
-
-The API implements signal handlers (SIGTERM, SIGINT) and atexit hooks to release GPU memory cleanly:
-
-1. Signal received → `engine.shutdown()` is called
-2. Engine drops model references, runs `gc.collect()`, calls `torch.cuda.empty_cache()`
-3. Process exits via `os._exit(0)`
-
-The dashboard sends SIGTERM to the entire process group (API + workers), ensuring no orphaned processes hold VRAM.
 
 ## License
 

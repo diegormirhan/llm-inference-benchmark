@@ -1,20 +1,14 @@
-# Servidor de API e Runtime
-litestar
-granian
-pydantic-settings
+# API Server and Runtime
+litestar>=2.24.0
+uvicorn>=0.51.0
+pydantic-settings>=2.14.2
 
-# Inferência
-torch
-vllm
-transformers
-torch-c-dlpack-ext
-# Teste de Carga (Assíncrono)
-httpx
+# Load Test (Asynchronous)
+httpx>=0.28.1
 
-# Telemetria de GPU (Específico para AMD)
-amdsmi
+# GPU Telemetry (AMD ROCm)
+amdsmi>=7.0.2
 
-# Dashboard e Dados
-streamlit
-pandas
-matplotlib
+# Dashboard e Vizualization
+streamlit>=1.60.0
+pandas>=3.0.5
