@@ -50,6 +50,22 @@ The dashboard is the parent process. It starts the API as a subprocess, monitors
 
 All GPU memory is owned by the API process. The dashboard and tester run on CPU only.
 
+---
+
+## 📊 Application Interface
+
+Below are visual highlights of how the system works in real-time.
+
+*   ### 📥 Select the desired inference engine and choose the configuration for the Benchmark
+    ![image](https://i.imgur.com/7lbU6Ra.png)
+
+*   ### ⚡ Structured Output for the Engine
+    ![image](https://i.imgur.com/frstrPh.png)
+
+*   ### 📜 Results & Analytical Insights
+    ![image](https://i.imgur.com/zSX0HxA.png)
+---
+
 ## Project Structure
 
 ### Directory Tree
